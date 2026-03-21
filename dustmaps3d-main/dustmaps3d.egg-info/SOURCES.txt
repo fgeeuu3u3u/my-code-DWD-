@@ -1,0 +1,12 @@
+LICENSE
+README.md
+pyproject.toml
+dustmaps3d/__init__.py
+dustmaps3d/cli.py
+dustmaps3d/core.py
+dustmaps3d.egg-info/PKG-INFO
+dustmaps3d.egg-info/SOURCES.txt
+dustmaps3d.egg-info/dependency_links.txt
+dustmaps3d.egg-info/entry_points.txt
+dustmaps3d.egg-info/requires.txt
+dustmaps3d.egg-info/top_level.txt

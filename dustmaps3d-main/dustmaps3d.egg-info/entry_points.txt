@@ -1,0 +1,2 @@
+[console_scripts]
+dust = dustmaps3d.cli:main
