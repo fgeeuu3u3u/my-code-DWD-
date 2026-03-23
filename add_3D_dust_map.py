@@ -27,6 +27,8 @@ from tqdm import tqdm
 import warnings
 import contextlib
 import io
+import shutil
+import gc
 warnings.filterwarnings('ignore')
 
 class SingleBatchProgressProcessor:
@@ -45,23 +47,28 @@ class SingleBatchProgressProcessor:
         
         print(f"三个处理步骤将共同使用 {self.n_cores} 个CPU核心")
 
-    def _add_coordinates_to_batch(self, batch_df):
-        """为数据批次添加坐标列"""
+    def _add_coordinates_to_df(self, df):
+        """为DataFrame添加坐标列（向量化，一次性处理）"""
         try:
-            # 向量化坐标转换
-            x_pc = batch_df['x_pc'].values.astype(float)
-            y_pc = batch_df['y_pc'].values.astype(float)
-            z_pc = batch_df['z_pc'].values.astype(float)
+            # 检查必要列
+            if 'x_pc' not in df.columns:
+                print("  警告: 缺少 x_pc 列，跳过坐标转换")
+                return df
             
-            # 转换为kpc
-            x_kpc = (x_pc * u.pc).to(u.kpc)
-            y_kpc = (y_pc * u.pc).to(u.kpc)
-            z_kpc = (z_pc * u.pc).to(u.kpc)
+            # 向量化坐标转换（直接除法，避免astropy单位转换开销）
+            x_pc = df['x_pc'].values.astype(float)
+            y_pc = df['y_pc'].values.astype(float)
+            z_pc = df['z_pc'].values.astype(float)
+            
+            # 转换为kpc（直接除以1000，快很多）
+            x_kpc = x_pc / 1000.0
+            y_kpc = y_pc / 1000.0
+            z_kpc = z_pc / 1000.0
             
             # 批量坐标转换
             galactocentric_coords = coord.Galactocentric(
-                x=x_kpc, y=y_kpc, z=z_kpc,
-                galcen_distance=8.5*u.kpc, z_sun=0*u.pc
+                x=x_kpc * u.kpc, y=y_kpc * u.kpc, z=z_kpc * u.kpc,
+                galcen_distance=8.5 * u.kpc, z_sun=0 * u.pc
             )
             
             try:
@@ -70,191 +77,150 @@ class SingleBatchProgressProcessor:
                 icrs_coords = galactocentric_coords.transform_to(coord.ICRS())
                 galactic_coords = icrs_coords.transform_to(coord.Galactic())
             
-            # 添加新列到原DataFrame
-            batch_df['l'] = galactic_coords.l.deg
-            batch_df['b'] = galactic_coords.b.deg
-            batch_df['distance_to_sun_pc'] = galactic_coords.distance.to(u.pc).value
-            batch_df['d'] = batch_df['distance_to_sun_pc'] / 1000.0
+            # 添加新列
+            df['l'] = galactic_coords.l.deg
+            df['b'] = galactic_coords.b.deg
+            df['distance_to_sun_pc'] = galactic_coords.distance.to(u.pc).value
+            df['d'] = df['distance_to_sun_pc'] / 1000.0
             
             # 验证距离是否有效
-            invalid_distance = (batch_df['distance_to_sun_pc'] <= 0) | np.isnan(batch_df['distance_to_sun_pc'])
-            if np.any(invalid_distance):
-                batch_df.loc[invalid_distance, 'distance_to_sun_pc'] = np.nan
-                batch_df.loc[invalid_distance, 'd'] = np.nan
+            invalid = (df['distance_to_sun_pc'] <= 0) | np.isnan(df['distance_to_sun_pc'])
+            if np.any(invalid):
+                df.loc[invalid, 'distance_to_sun_pc'] = np.nan
+                df.loc[invalid, 'd'] = np.nan
             
-            return batch_df
+            return df
             
         except Exception as e:
             print(f"坐标转换错误: {e}")
-            return batch_df
+            return df
 
-    def _add_extinction_to_batch(self, batch_df):
-        """为数据批次添加消光值列（完全禁用内部输出）"""
+    def _add_extinction_to_df(self, df):
+        """为DataFrame添加消光值列（一次性查询所有点）"""
         try:
             # 检查是否已有坐标列
-            if 'l' not in batch_df.columns or 'b' not in batch_df.columns or 'd' not in batch_df.columns:
-                batch_df['EBV'] = 0.0
-                return batch_df
+            if 'l' not in df.columns or 'b' not in df.columns or 'd' not in df.columns:
+                df['EBV'] = 0.0
+                return df
             
-            # 检查是否有有效坐标（非空、非nan）
-            valid_coords = (~batch_df['l'].isna()) & (~batch_df['b'].isna()) & (~batch_df['d'].isna())
-            
-            # 初始化消光列为0
-            batch_df['EBV'] = 0.0
+            # 检查是否有有效坐标
+            valid_coords = (~df['l'].isna()) & (~df['b'].isna()) & (~df['d'].isna())
+            df['EBV'] = 0.0
             
             if np.any(valid_coords):
-                # 只处理有效坐标的行
-                dustmaps_input = batch_df.loc[valid_coords, ['l', 'b', 'd']].copy()
+                # 收集所有有效坐标
+                dustmaps_input = df.loc[valid_coords, ['l', 'b', 'd']].copy()
                 dustmaps_input = dustmaps_input.reset_index(drop=True)
                 
-                # 查询消光值
+                # 一次性查询所有消光值
                 with open(os.devnull, 'w') as f, contextlib.redirect_stdout(f), contextlib.redirect_stderr(f):
                     processed_dustmaps = dustmaps3d_from_df(
                         dustmaps_input, 
                         n_process=self.n_cores,
-                        chunk_size=len(batch_df)
+                        chunk_size=max(1000, len(dustmaps_input) // self.n_cores)
                     )
                 
                 # 将消光值填入对应的行
-                batch_df.loc[valid_coords, 'EBV'] = processed_dustmaps['EBV'].values
+                ebv_values = processed_dustmaps['EBV'].values
+                ebv_values = np.nan_to_num(ebv_values, nan=0.0)
+                df.loc[valid_coords, 'EBV'] = ebv_values
             
-            return batch_df
+            return df
             
         except Exception as e:
             print(f"消光查询错误: {e}")
-            batch_df['EBV'] = 0.0
-            return batch_df
+            df['EBV'] = 0.0
+            return df
 
-    def _add_magnitudes_to_batch(self, batch_df):
-        """为数据批次添加星等列"""
+    def _add_magnitudes_to_df(self, df):
+        """为DataFrame添加星等列（向量化）"""
         try:
-            # 检查是否已有必要列
-            if 'distance_to_sun_pc' not in batch_df.columns:
-                return batch_df
+            if 'distance_to_sun_pc' not in df.columns:
+                return df
             
-            # 向量化星等计算
-            distance_pc = batch_df['distance_to_sun_pc'].values
-            ebv = batch_df['EBV'].values
-            
+            distance_pc = df['distance_to_sun_pc'].values
+            ebv = df['EBV'].values
             bands = ['u', 'g', 'r', 'i', 'z', 'y']
             
             for band in bands:
                 abs_mag_col = f'{band}_mag'
-                observed_mag_col = f'{band}_mag_observed'
+                obs_mag_col = f'{band}_mag_observed'
                 
-                if abs_mag_col not in batch_df.columns:
+                if abs_mag_col not in df.columns:
                     continue
                 
-                absolute_mag = batch_df[abs_mag_col].values
+                absolute_mag = df[abs_mag_col].values
                 observed_mag = np.full_like(absolute_mag, np.nan)
                 
-                # 向量化计算：距离有效且绝对星等有效
-                valid_mask = ((distance_pc > 0) & 
-                            ~np.isnan(distance_pc) & 
-                            ~np.isinf(distance_pc) & 
-                            ~np.isnan(absolute_mag))
+                # 有效掩码
+                valid = ((distance_pc > 0) & 
+                        ~np.isnan(distance_pc) & 
+                        ~np.isinf(distance_pc) & 
+                        ~np.isnan(absolute_mag))
                 
-                if np.any(valid_mask):
-                    extinction_correction = self.extinction_coefficients[band] * ebv[valid_mask]
-                    observed_mag[valid_mask] = (absolute_mag[valid_mask] + 
-                                               5 * np.log10(distance_pc[valid_mask]) - 5 +
-                                               extinction_correction)
+                if np.any(valid):
+                    # 距离模数
+                    dm = 5 * np.log10(distance_pc[valid]) - 5
+                    # 消光改正
+                    extinction = self.extinction_coefficients[band] * ebv[valid]
+                    observed_mag[valid] = absolute_mag[valid] + dm + extinction
                 
-                # 直接添加观测星等列到原DataFrame
-                batch_df[observed_mag_col] = observed_mag
+                df[obs_mag_col] = observed_mag
             
-            return batch_df
+            return df
             
         except Exception as e:
             print(f"星等计算错误: {e}")
-            return batch_df
+            return df
 
     def process_single_component(self, input_file):
-        """使用单一批次进度条处理单个银河系组分"""
+        """处理单个文件（一次性加载，批量处理）"""
         try:
             if not os.path.exists(input_file):
-                print(f"输入文件不存在: {input_file}")
+                print(f"文件不存在: {input_file}")
                 return False
             
-            # 获取总行数
-            with pd.HDFStore(input_file, 'r') as store:
-                nrows = store.get_storer('conv').nrows
+            # 一次性读取整个文件（如果内存足够）
+            print(f"读取文件: {os.path.basename(input_file)}")
+            df = pd.read_hdf(input_file, key='conv')
+            nrows = len(df)
+            print(f"  总行数: {nrows:,}")
             
-            print(f"处理文件: {os.path.basename(input_file)}")
-            print(f"数据总量: {nrows:,} 行")
+            # 步骤1: 添加坐标列
+            print("  添加坐标列...")
+            df = self._add_coordinates_to_df(df)
             
-            # 设置批次大小
-            batch_size = 20000
-            total_batches = (nrows + batch_size - 1) // batch_size
+            # 步骤2: 添加消光值列（一次性查询）
+            print("  查询消光值...")
+            df = self._add_extinction_to_df(df)
             
-            # 创建单一进度条（按批次更新）
-            pbar = tqdm(total=total_batches, desc=f"处理批次", 
-                       unit='batch', mininterval=0.5, maxinterval=1.0)
+            # 步骤3: 添加星等列
+            print("  计算观测星等...")
+            df = self._add_magnitudes_to_df(df)
             
-            # 创建临时文件用于安全更新
+            # 保存回文件（用临时文件）
+            print("  保存文件...")
             temp_file = input_file + ".tmp"
-            
-            # 如果临时文件存在，删除它
             if os.path.exists(temp_file):
                 os.remove(temp_file)
             
-            first_batch = True
-            
-            for batch_idx in range(total_batches):
-                start = batch_idx * batch_size
-                stop = min(start + batch_size, nrows)
-                
-                # 读取当前批次数据
-                with pd.HDFStore(input_file, 'r') as store:
-                    batch_df = store.select('conv', start=start, stop=stop)
-                
-                if batch_df.empty:
-                    pbar.update(1)
-                    continue
-                
-                # 步骤1: 添加坐标列
-                batch_df = self._add_coordinates_to_batch(batch_df)
-                
-                # 步骤2: 添加消光值列
-                batch_df = self._add_extinction_to_batch(batch_df)
-                
-                # 步骤3: 添加星等列
-                batch_df = self._add_magnitudes_to_batch(batch_df)
-                
-                # 将更新后的批次写入临时文件
-                with pd.HDFStore(temp_file, mode='a') as store:
-                    if first_batch:
-                        store.put('conv', batch_df, format='table', 
-                                data_columns=True, append=False)
-                        first_batch = False
-                    else:
-                        store.append('conv', batch_df, format='table')
-                
-                # 更新批次进度条
-                pbar.update(1)
-                pbar.set_postfix({
-                    '当前批次': f'{batch_idx+1}/{total_batches}',
-                    '已处理行数': f'{(batch_idx+1)*batch_size:,}'
-                })
-            
-            # 关闭进度条
-            pbar.close()
-            
-            # 用临时文件替换原文件
-            import shutil
+            df.to_hdf(temp_file, key='conv', mode='w', format='table', 
+                     data_columns=True, index=False)
             shutil.move(temp_file, input_file)
             
             print(f"处理完成: {input_file}")
             
             # 验证添加的列
-            with pd.HDFStore(input_file, 'r') as store:
-                final_df = store.select('conv', start=0, stop=1)
-                original_columns = ['x_pc', 'y_pc', 'z_pc'] + [f'{band}_mag' for band in ['u', 'g', 'r', 'i', 'z', 'y']]
-                new_columns = [col for col in final_df.columns 
-                             if col not in original_columns and 
-                             (col in ['l', 'b', 'd', 'distance_to_sun_pc', 'EBV'] 
-                              or col.endswith('_mag_observed'))]
-                print(f"成功添加 {len(new_columns)} 个新列")
+            original_columns = ['x_pc', 'y_pc', 'z_pc'] + [f'{band}_mag' for band in ['u', 'g', 'r', 'i', 'z', 'y']]
+            new_columns = [col for col in df.columns 
+                         if col not in original_columns and 
+                         (col in ['l', 'b', 'd', 'distance_to_sun_pc', 'EBV'] 
+                          or col.endswith('_mag_observed'))]
+            print(f"  成功添加 {len(new_columns)} 个新列")
+            
+            # 释放内存
+            del df
+            gc.collect()
             
             return True
             
@@ -266,27 +232,34 @@ class SingleBatchProgressProcessor:
             # 清理临时文件
             if os.path.exists(temp_file):
                 os.remove(temp_file)
-                
+            
             return False
 
     def process_all_components(self, base_dir, components=None):
         """处理所有银河系组分"""
         if components is None:
-            components = ['halo', 'thick_disc', 'bulge', 'thin_disc']
+            components = ['0.1', '0.3', '1', '3']
         
-        print(f"开始处理 {len(components)} 个银河系组分")
+        print(f"开始处理 {len(components)} 个组分")
         success_count = 0
         
-        for comp in components:
+        for comp in tqdm(components, desc="总体进度"):
             print(f"\n{'='*60}")
             print(f"处理组分: {comp}")
             print(f"{'='*60}")
             
+            # 输入文件
             input_file = f"{base_dir}/dwd_{comp}_interpolated.h5"
             
             if not os.path.exists(input_file):
                 print(f"文件不存在: {input_file}")
-                continue
+                # 尝试查找其他格式
+                alt_file = f"{base_dir}/dwd_{comp}.h5"
+                if os.path.exists(alt_file):
+                    print(f"找到备用文件: {alt_file}")
+                    input_file = alt_file
+                else:
+                    continue
             
             success = self.process_single_component(input_file)
             if success:
@@ -303,5 +276,5 @@ if __name__ == "__main__":
     processor = SingleBatchProgressProcessor(n_cores=26)
     
     # 处理所有组件
-    base_directory = "different_galactic_component_dwd_population_detached"
+    base_directory = "/publicfs10/fs10-m9/home/m9s003101/cosmic/LISA范围之内的DWD"
     processor.process_all_components(base_directory)
