@@ -5,3 +5,5 @@ LSST绝对星等：所需文件
 冷却轨迹（0.2-1.3太阳质量）：https://www.astro.umontreal.ca/~bergeron/CoolingModels/
 大气模型（覆盖范围1500K-100000K，表面重力6.5-9.5）：https://warwick.ac.uk/fac/sci/physics/research/astro/people/tremblay/modelgrids/
 3.引力波分析：使用gbfisher
+
+To be continue..
