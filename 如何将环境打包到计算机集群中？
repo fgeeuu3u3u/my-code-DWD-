@@ -1,0 +1,149 @@
+查看当前计算机集群的存储空间的指令
+/publicfs10/fs10-share/soft/share-soft/tools/storage/check-quota -u $USER -f publicfs10
+
+
+如何激活conda？
+module load miniforge/25.9
+# 1. 初始化当前 shell 的 conda
+conda init bash
+
+# 2. 重新加载 bash 配置
+source ~/.bashrc
+
+# 3. 现在使用conda来激活 dustmap 环境
+conda activate dustmap
+
+
+
+添加网络代理：
+export http_proxy=http://172.18.1.1:8888
+export https_proxy=http://172.18.1.1:8888
+
+# === 修改：使用绝对路径激活环境 ===
+source /publicfs10/fs10-m9/home/m9s003101/.conda/envs/cosmic/bin/activate
+source activate cosmic
+cd /publicfs10/fs10-m9/home/m9s003101/cosmic
+source /publicfs10/fs10-m9/home/m9s003101/.conda/envs/dustmap/bin/activate
+source activate dustmap
+
+
+
+如何将本地计算机中配置好的环境移植到计算机集群中去运行呢？
+
+首先，在本地机器上，于基础（base）环境中安装 conda-pack并对目标环境进行打包。
+# 安装 conda-pack
+conda install -c conda-forge conda-pack
+
+
+
+###########################cosmic这个环境是我们直接通过pip install安装的，所以说我们直接这样打包过去是没有问题的#####################
+# 打包名为 'cosmic' 的环境
+conda pack -n cosmic -o cosmic_environment.tar.gz
+
+# 在集群上创建目标目录（目录名即为新环境名）
+mkdir -p ~/.conda/envs/cosmic
+
+# 解压到该目录
+tar -xzf cosmic_environment.tar.gz -C ~/.conda/envs/cosmic
+
+# 直接激活解压后的环境
+source ~/.conda/envs/cosmic/bin/activate
+
+# 验证环境
+conda activate cosmic
+python -c "import cosmic; print('环境激活成功！')"
+
+
+
+
+###########################duatmap这个环境是我们直接通过手动安装的，也就是说我们是现在github上下载了文件夹，然后我们使用可编辑模式安装 (pip install -e .)来安装的，所以说我们直接这样打包过去是会出现问题的#####################
+由于这个环境我们只使用到了一个包，而且这个包是手动安装的，这就是问题所在，手动安装的在打包之后会出现问题
+所以我们在计算机集群中同样使用手动安装
+pip install .
+
+
+
+
+如何在计算机集群中进行C语言代码的编译？？？
+
+cd /publicfs10/fs10-m9/home/m9s003101/cosmic
+#首先在服务器上管理员会帮我们安装好编译C语言代码所需要的库，我们需要激活来查看
+source /publicfs10/fs10-share/soft/share-soft/modules/module.sh
+module ava gcc 
+#通过查看部署的gcc的版本来加载对应的版本
+module load gcc/14.2.0 
+
+#查看gsl的路径
+module show gsl
+
+#将gsl的库文件以及头文件加入我们的make file文件中使得编译器可以通过链接找到我们的外部库文件，具体如下所示：
+################################################################################################################
+################################################################################################################
+# OpenMP
+#CC = gcc-mp-5
+#CC = clang-mp-9.0
+CC = gcc
+#CCFLAGS = -fopenmp 
+
+# 设定GSL的路径
+GSL_INCLUDE_PATH = /publicfs10/fs10-share/soft/share-soft/gsl/gsl-2.8/install/include
+GSL_LIB_PATH = /publicfs10/fs10-share/soft/share-soft/gsl/gsl-2.8/install/lib
+
+# 添加GSL头文件路径
+CCFLAGS += -I$(GSL_INCLUDE_PATH)
+
+# 添加GSL库路径
+LDFLAGS = -L$(GSL_LIB_PATH)  # 修改这里，使用=而不是+=
+
+LIBS = -lgsl -lgslcblas -lm  # 修改这里，添加-l前缀
+
+CCFLAGS += -O3 -g -ffast-math  -ftree-vectorize -std=gnu99 
+
+OBJS = LISA.o GalacticBinaryIO.o GalacticBinaryModel.o GalacticBinaryWaveform.o GalacticBinaryMath.o GalacticBinaryData.o GalacticBinaryPrior.o GalacticBinaryProposal.o GalacticBinaryFStatistic.o 
+
+# 编译目标
+all: $(OBJS) gb_mcmc gb_match gb_catalog gb_mcmc_chirpmass gb_mcmc_brans_dicke gb_residual libgbmcmc.a
+################################################################################################################
+################################################################################################################
+
+
+#修改之后我们需要在当前文件夹中进行编译，也就是我们输入make
+那么此时我们可以在当前文件夹运行我们编译好的C代码，但是注意，此时所有的文件都只能在这个文件夹中运行，因为我们并没有将编译好的文件拷贝到我们的系统路径
+
+#接下来介绍一种可以在整个系统路径的任何子目录中都可以直接运行这个编译好的代码的方法
+我们需要进行make install    
+
+
+在make file文件中安装的系统路径是${HOME}/ldasoft/master/bin/
+所以我们需要在HOME目录中创建一个目录树ldasoft/master/bin/，只有这样安装的时候才能将编译好的文件安装到目标路径
+为了简洁，我们直接在make file中加入一行代码来创建这么一个目录
+################################################################################################################
+################################################################################################################
+install : gb_mcmc gb_match gb_catalog gb_mcmc_chirpmass gb_mcmc_brans_dicke gb_residual libgbmcmc.a
+	mkdir -p ${HOME}/ldasoft/master/bin/
+	install gb_mcmc gb_match gb_catalog gb_mcmc_chirpmass gb_mcmc_brans_dicke gb_residual ${HOME}/ldasoft/master/bin/
+################################################################################################################
+################################################################################################################
+
+#####为了让系统可以找到这些路径，我们设置环境变量
+1.将安装目录添加到PATH
+echo 'export PATH=$HOME/ldasoft/master/bin:$PATH' >> ~/.bashrc
+
+2. 确保GSL库路径被设置
+echo 'export LD_LIBRARY_PATH=/publicfs10/fs10-share/soft/share-soft/gsl/gsl-2.8/install/lib:$LD_LIBRARY_PATH' >> ~/.bashrc
+
+3. 使更改生效
+source ~/.bashrc
+
+至此整个在服务器上编译的过程完成，在系统路径之下的每一个子目录中都可以直接执行！（个人计算机上需要单独安装GSL。服务器上的GSL是已经安装好的，我们只需要加载即可，其余步骤相同）
+
+
+
+##############
+对于单独的文件，我们可以单独进行编译然后将其放入系统路径中就可以了
+# 编译
+gcc -O2 -o Catalogue Catalogue.c -lm
+# 复制
+cp Catalogue ~/ldasoft/master/bin/
+
+

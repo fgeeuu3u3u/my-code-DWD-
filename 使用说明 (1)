@@ -1,0 +1,502 @@
+########################################################
+########################################################
+绘制周期——偏心率热力图，这是我们假设所有的DWD都是圆轨道的基础
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from matplotlib.colors import LogNorm
+from matplotlib.ticker import LogLocator, LogFormatter, NullFormatter
+import seaborn as sns
+
+# 设置样式
+plt.style.use('default')
+sns.set_style("whitegrid")
+
+# 创建图形和坐标轴
+fig, ax = plt.subplots(1, 1, figsize=(12, 8))
+
+# 提取数据
+porb = conv['porb'].values
+ecc = conv['ecc'].values
+
+# 对周期数据取对数
+log_porb = np.log10(porb + 1e-10)
+
+# 创建2D直方图用于热力图
+x_bins = 200
+y_bins = 50
+
+# 计算2D直方图
+hist, x_edges, y_edges = np.histogram2d(
+    log_porb, ecc, 
+    bins=[x_bins, y_bins],
+    range=[[log_porb.min(), log_porb.max()], [0, 1]]
+)
+
+# 处理数据中的0值，避免对数计算问题
+hist_data = hist.T.copy()
+nonzero_min = hist_data[hist_data > 0].min() if np.any(hist_data > 0) else 1
+hist_data[hist_data == 0] = nonzero_min / 5
+
+# 使用LogNorm
+vmin = max(1e-3, hist_data.min())
+vmax = hist_data.max()
+
+im = ax.imshow(
+    hist_data,
+    aspect='auto', 
+    origin='lower',
+    extent=[x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]],
+    cmap='viridis',
+    interpolation='nearest',
+    norm=LogNorm(vmin=vmin, vmax=vmax)
+)
+
+# 设置横轴刻度
+period_ticks = [0.01, 0.1, 1, 10, 100, 1000, 10000, 100000, 1000000]
+log_ticks = [np.log10(x) for x in period_ticks]
+
+# 设置刻度位置
+ax.set_xticks(log_ticks)
+
+# 设置刻度标签为10的次方表示
+ax.set_xticklabels([f'$10^{{{int(np.log10(x))}}}$' for x in period_ticks])
+
+
+# 设置纵轴刻度
+ax.set_yticks(np.arange(0, 1.1, 0.2))
+# 设置轴标签
+ax.set_xlabel('Period (days)', fontsize=12)
+ax.set_ylabel('Eccentricity', fontsize=12)
+# 添加颜色条
+cbar = plt.colorbar(im, ax=ax, shrink=0.8)
+cbar.set_label('Number', fontsize=12)
+
+plt.tight_layout()
+plt.show()
+########################################################
+########################################################
+
+
+
+#########代码源自cosmic官网##########
+import pandas
+
+import pandas as pd
+import numpy as np
+
+import numpy
+
+conv = pandas.read_hdf('dwd_thin_disc_interpolated.h5', key='conv')
+
+print(conv) 
+
+
+
+
+import pandas as pd
+
+# 使用chunksize分批读取数据
+chunksize = 100  # 每次读取100行
+chunk_iterator = pd.read_hdf('dwd_thin_disc_interpolated.h5', key='conv', chunksize=chunksize)
+
+# 读取前100行并打印特定列
+for i, chunk in enumerate(chunk_iterator):
+    if i == 0:  # 只处理第一批数据
+        print(chunk[['mass_1', 'kstar_2']])  # 只打印特定的列
+        break  # 只读取并打印100行，结束循环
+
+
+
+initC = pandas.read_hdf('dat_kstar1_10_12_kstar2_10_12_SFstart_13700.0_SFduration_0_metallicity_0.02.h5', key='initC')
+
+total_mass = pandas.read_hdf('dat_kstar1_10_12_kstar2_10_12_SFstart_13700.0_SFduration_0.0_metallicity_0.02.h5', key='mass_stars')
+
+bcm = pandas.read_hdf('dat_kstar1_10_12_kstar2_10_12_SFstart_13700.0_SFduration_0_metallicity_0.02.h5', key='bcm')
+
+N_stars = pandas.read_hdf('dat_kstar1_10_12_kstar2_10_12_SFstart_13700.0_SFduration_0_metallicity_0.02.h5', key='n_stars')
+
+
+#其中bpp的内存较大
+bpp_sample = pd.read_hdf('dat_kstar1_10_12_kstar2_10_12_SFstart_13700.0_SFduration_0_metallicity_0.02.h5', key='bpp',stop=1000)
+print(bpp_sample)
+# 筛选出 bin_num 
+filtered_data = bpp_sample[bpp_sample['bin_num'] == 6]
+print(filtered_data)
+
+
+
+
+# 使用HDFStore将两个数据集保存到同一个HDF5文件中[3,5](@ref)
+with pd.HDFStore('DWD_z=0.02.h5', mode='w') as store:
+    store.put('conv', conv, format='fixed')      # 保存conv数据
+    store.put('mass_stars', total_mass, format='fixed')  # 保存mass_stars数据
+
+
+# 总系统数
+total_systems = len(conv)
+print(f"总系统数: {total_systems:,}")
+
+# 计算轨道频率 f_orb = 2 / P (Hz)
+# porb 单位是 days -> 转换成秒
+conv['P_sec'] = conv['porb'] * 86400.0
+conv['f_orb'] = 2.0 / conv['P_sec']
+
+# DWD 类型分类
+def classify_dwd(k1, k2):
+    if k1 == 10 and k2 == 10:
+        return 'He+He'
+    elif (k1 == 10 and k2 == 11) or (k1 == 11 and k2 == 10):
+        return 'He+CO'
+    elif k1 == 11 and k2 == 11:
+        return 'CO+CO'
+    elif k1 == 12 or k2 == 12:
+        return 'ONe+X'
+    else:
+        return 'Other'
+
+conv['dwd_type'] = conv.apply(lambda r: classify_dwd(r['kstar_1'], r['kstar_2']), axis=1)
+
+# =========================
+# 1) 全部系统统计
+# =========================
+count_all = conv['dwd_type'].value_counts()
+ratio_all = count_all / total_systems * 100
+
+df_all = pd.DataFrame({
+    'count': count_all,
+    'ratio(%)': ratio_all
+})
+
+print("\n===== 全部系统：不同 DWD 类型数量与比例 =====")
+print(df_all)
+
+# =========================
+# 2) 频率筛选 f_orb > 0.00001Hz
+# =========================
+freq_threshold = 0.0001
+conv_high_f = conv[conv['f_orb'] > freq_threshold].copy()
+
+total_high_f = len(conv_high_f)
+print(f"\n频率筛选后的系统总数: {total_high_f:,} (f_orb > {freq_threshold} Hz)")
+
+count_high = conv_high_f['dwd_type'].value_counts()
+ratio_high = count_high / total_high_f * 100
+
+df_high = pd.DataFrame({
+    'count': count_high,
+    'ratio(%)': ratio_high
+})
+
+print("\n===== 频率筛选后：不同 DWD 类型数量与比例 =====")
+print(df_high)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+import pandas as pd
+import numpy as np
+
+# 加载数据
+bcm = pd.read_hdf('dat_kstar1_10_12_kstar2_10_12_SFstart_13700.0_SFduration_0_metallicity_0.02.h5', key='bcm')
+# 筛选DWD系统
+dwd_mask = (bcm['kstar_1'] >= 10) & (bcm['kstar_1'] <= 12) & (bcm['kstar_2'] >= 10) & (bcm['kstar_2'] <= 12)
+dwd_data = bcm[dwd_mask].copy()  
+print(dwd_data)
+
+# 定义DWD类型分类函数
+def classify_dwd_type(k1, k2):
+    k1, k2 = int(k1), int(k2)
+    
+    if k1 == 10 and k2 == 10:
+        return 'He+He'
+    elif (k1 == 10 and k2 == 11) or (k1 == 11 and k2 == 10):
+        return 'He+CO'
+    elif k1 == 11 and k2 == 11:
+        return 'CO+CO'
+    elif k1 == 12 or k2 == 12:
+        companion = k2 if k1 == 12 else k1
+        if companion == 10:
+            return 'ONe+He'
+        elif companion == 11:
+            return 'ONe+CO'
+        elif companion == 12:
+            return 'ONe+ONe'
+        else:
+            return f'ONe+其他'
+    else:
+        return f'其他({k1}+{k2})'
+
+# 添加DWD类型标签 - 使用.loc避免链式赋值[3,5](@ref)
+dwd_data.loc[:, 'dwd_type'] = dwd_data.apply(lambda row: classify_dwd_type(row['kstar_1'], row['kstar_2']), axis=1)
+
+
+
+# 在DWD中筛选高频系统
+SECONDS_PER_DAY = 86400.0
+dwd_data.loc[:, 'frequency_Hz'] = 2.0 / (dwd_data['porb'] * SECONDS_PER_DAY)  # 使用.loc赋值[3](@ref)
+freq_threshold = 0.0000185
+high_freq = dwd_data[dwd_data['frequency_Hz'] > freq_threshold].copy()  # 筛选后也创建副本[8](@ref)
+
+# 统计高频DWD的类型分布
+print("\n" + "=" * 60)
+print(f"频率 > {freq_threshold} Hz 的高频DWD类型统计:")
+print("=" * 60)
+print(f"高频DWD总数: {len(high_freq_):,}")
+print(f"占DWD比例: {len(high_freq)/len(dwd_data)*100:.2f}%")
+print()
+
+high_freq_type_counts = high_freq['dwd_type'].value_counts()
+for dwd_type, count in high_freq_type_counts.items():
+    percentage = count / len(high_freq) * 100
+    print(f"  {dwd_type:15}: {count:>8,} 个系统 ({percentage:>6.2f}%)")
+    
+
+
+
+# 筛选无质量转移DWD
+no_mt_mask = (dwd_data['RRLO_1'] <= 1) & (dwd_data['RRLO_2'] <= 1)
+dwd_no_mt = dwd_data[no_mt_mask]
+print(dwd_no_mt)
+# 统计无质量转移DWD的类型分布
+print("=" * 60)
+print("无质量转移DWD类型统计:")
+print("=" * 60)
+print(f"无质量转移DWD总数: {len(dwd_no_mt):,}")
+print()
+
+no_mt_type_counts = dwd_no_mt['dwd_type'].value_counts()
+for dwd_type, count in no_mt_type_counts.items():
+    percentage = count / len(dwd_no_mt) * 100
+    print(f"  {dwd_type:15}: {count:>8,} 个系统 ({percentage:>6.2f}%)")
+
+# 在无质量转移DWD中筛选高频系统
+SECONDS_PER_DAY = 86400.0
+dwd_no_mt['frequency_Hz'] = 2.0 / (dwd_no_mt['porb'] * SECONDS_PER_DAY)
+freq_threshold = 0.0001
+high_freq_no_mt = dwd_no_mt[dwd_no_mt['frequency_Hz'] > freq_threshold]
+
+# 统计高频无质量转移DWD的类型分布
+print("\n" + "=" * 60)
+print(f"频率 > {freq_threshold} Hz 的高频无质量转移DWD类型统计:")
+print("=" * 60)
+print(f"高频无质量转移DWD总数: {len(high_freq_no_mt):,}")
+print(f"占无质量转移DWD比例: {len(high_freq_no_mt)/len(dwd_no_mt)*100:.2f}%")
+print()
+
+high_freq_type_counts = high_freq_no_mt['dwd_type'].value_counts()
+for dwd_type, count in high_freq_type_counts.items():
+    percentage = count / len(high_freq_no_mt) * 100
+    print(f"  {dwd_type:15}: {count:>8,} 个系统 ({percentage:>6.2f}%)")
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+
+
+
+
+
+
+
+import pandas as pd
+import numpy as np
+import corner
+import matplotlib.pyplot as plt
+import matplotlib as mpl  # 添加缺失的导入
+from matplotlib import colors
+from matplotlib.cm import ScalarMappable
+
+# 设置中文字体
+plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = False
+
+# 加载数据
+conv = pd.read_hdf('dat_kstar1_10_12_kstar2_10_12_SFstart_13700.0_SFduration_0.0_metallicity_0.02.h5', key='conv')
+initC = pd.read_hdf('dat_kstar1_10_12_kstar2_10_12_SFstart_13700.0_SFduration_0.0_metallicity_0.02.h5', key='initC')
+
+# DWD 类型分类函数
+def classify_dwd(k1, k2):
+    if k1 == 10 and k2 == 10:
+        return 'He+He'
+    elif (k1 == 10 and k2 == 11) or (k1 == 11 and k2 == 10):
+        return 'He+CO'
+    elif k1 == 11 and k2 == 11:
+        return 'CO+CO'
+    elif k1 == 12 or k2 == 12:
+        return 'ONe+X'
+    else:
+        return 'Other'
+
+# 为conv数据添加DWD类型标签
+conv['dwd_type'] = conv.apply(lambda r: classify_dwd(r['kstar_1'], r['kstar_2']), axis=1)
+
+# 安全重置索引：如果bin_num是索引，则重置但不添加为列
+if initC.index.names[0] == 'bin_num' and 'bin_num' in initC.columns:
+    # bin_num既是索引又是列，重置索引但丢弃原索引
+    initC_clean = initC.reset_index(drop=True)
+else:
+    initC_clean = initC.reset_index()
+
+print(f"处理后initC形状: {initC_clean.shape}")
+
+# 创建DWD类型映射
+dwd_type_mapping = conv[['bin_num', 'dwd_type']].drop_duplicates()
+
+# 合并initC与DWD类型信息
+initC_with_dwd = pd.merge(initC_clean, dwd_type_mapping, on='bin_num', how='inner')
+
+# 计算质量比
+initC_with_dwd['q'] = initC_with_dwd['mass_2'] / initC_with_dwd['mass_1']
+
+print(f"合并成功！合并后数据行数: {len(initC_with_dwd)}")
+print("DWD类型分布:")
+print(initC_with_dwd['dwd_type'].value_counts())
+
+# 设置参数和颜色
+parameters = ['mass_1', 'mass_2', 'porb', 'ecc', 'q']
+dwd_types = ['He+He', 'He+CO', 'CO+CO', 'ONe+X']
+colors_list = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']  # 修正变量名
+
+labels = [
+    "Mass1 (M$_{\odot}$)", 
+    "Mass2 (M$_{\odot}$)", 
+    "Orbital Period (days)", 
+    "Eccentricity",
+    "Mass Ratio (q)"
+]
+
+# 为每个DWD类型创建热力图形式的角图
+successful_plots = []
+
+for i, dwd_type in enumerate(dwd_types):
+    print(f"\n处理 {dwd_type} 类型...")
+    
+    # 筛选当前DWD类型的数据
+    type_data = initC_with_dwd[initC_with_dwd['dwd_type'] == dwd_type]
+    
+    if len(type_data) < 10:
+        print(f"  - 数据点不足: {len(type_data)} 个")
+        continue
+    
+    # 检查参数中是否有NaN值
+    if type_data[parameters].isnull().any().any():
+        print(f"  - 跳过，参数中包含NaN值")
+        nan_columns = type_data[parameters].isnull().any()
+        nan_cols = list(nan_columns[nan_columns].index)
+        print(f"  - 包含NaN的列: {nan_cols}")
+        continue
+    
+    print(f"  - 找到 {len(type_data)} 个有效系统")
+    
+    try:
+        # 计算热力图的bins数量（基于数据量动态调整）
+        n_bins = min(30, max(15, int(np.log10(len(type_data)) * 5)))
+        print(f"  - 使用 {n_bins}×{n_bins} 的bins")
+        
+        # 创建热力图形式的角图
+        fig = corner.corner(
+            type_data[parameters],
+            labels=labels,
+            bins=n_bins,  # 使用动态计算的bins数量
+            color=colors_list[i],
+            plot_contours=True, #等高线绘制
+            plot_datapoints=True,  # 大数据时开启散点
+            fill_contours=False,
+            hist_kwargs={'density': True, 'alpha': 0.7, 'color': colors_list[i]},
+            # 热力图相关参数
+            hist2d_kwargs={
+                'cmap': 'viridis',  # 使用viridis颜色映射
+                'norm': mpl.colors.LogNorm(vmin=1, vmax=None),  # 对数归一化
+                'bins': n_bins,  # 二维直方图的bins
+            },
+            show_titles=True,
+            title_fmt='.3f',
+            title_kwargs={'fontsize': 10},
+            figsize=(10, 10)  # 设置图形大小
+        )
+        
+        # 添加颜色条
+        # 找到二维直方图的axes
+        ndim = len(parameters)
+        axes = np.array(fig.axes).reshape((ndim, ndim))
+        
+        # 找到第一个二维子图来添加颜色条
+        for i_idx in range(1, ndim):
+            for j_idx in range(i_idx):
+                ax = axes[i_idx, j_idx]
+                collections = ax.collections
+                for coll in collections:
+                    if isinstance(coll, mpl.collections.QuadMesh):
+                        # 创建颜色条
+                        cbar = fig.colorbar(
+                            coll, 
+                            ax=axes[:, -1],  # 在最右侧的列上添加颜色条
+                            pad=0.02,
+                            shrink=0.8
+                        )
+                        cbar.set_label('Number of Systems', fontsize=12, rotation=270, labelpad=15)
+                        break
+                else:
+                    continue
+                break
+            else:
+                continue
+            break
+        
+        # 添加总标题
+        fig.suptitle(f'{dwd_type} DWD Systems - Initial Conditions (n={len(type_data):,})', 
+                    fontsize=16, y=1.02, fontweight='bold')
+        
+        # 调整布局
+        plt.tight_layout()
+        
+        # 保存图片
+        filename = f'heatmap_corner_{dwd_type.replace("+", "_")}.png'
+        fig.savefig(filename, dpi=300, bbox_inches='tight', facecolor='white')
+        plt.close(fig)
+        
+        print(f"  - 已保存: {filename}")
+        successful_plots.append(dwd_type)
+        
+    except Exception as e:
+        print(f"  - 绘图错误: {e}")
+        import traceback
+        traceback.print_exc()
+
+# 创建汇总统计信息
+if successful_plots:
+    print(f"\n=== 汇总统计 ===")
+    for dwd_type in successful_plots:
+        type_data = initC_with_dwd[initC_with_dwd['dwd_type'] == dwd_type]
+        
+        print(f"\n{dwd_type} 类型统计 (n={len(type_data):,}):")
+        for param in parameters:
+            data = type_data[param]
+            if len(data) > 0:
+                mean_val = data.mean()
+                median_val = data.median()
+                std_val = data.std()
+                q1 = data.quantile(0.16)  # 相当于 -1σ
+                q3 = data.quantile(0.84)  # 相当于 +1σ
+                print(f"  {param}: {mean_val:.3f} ± {std_val:.3f} (median={median_val:.3f}, 16-84%=[{q1:.3f}, {q3:.3f}])")
+
+print(f"\n完成！成功绘制 {len(successful_plots)} 个DWD类型的热力图角图")
+
